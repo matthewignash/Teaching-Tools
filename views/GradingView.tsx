@@ -1,8 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Assessment, StudentSubmission, RubricItem, QuestionGrade } from '../types';
 import { Button } from '../components/Button';
 import { Icons } from '../components/Icon';
 import { gradeStudentSubmission } from '../services/geminiService';
+import * as pdfjsLib from 'pdfjs-dist';
+
+// Set the worker source for PDF.js
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdn.jsdelivr.net/npm/pdfjs-dist@4.0.379/build/pdf.worker.min.mjs`;
 
 interface GradingViewProps {
   assessment: Assessment;
@@ -13,6 +17,9 @@ interface GradingViewProps {
 export const GradingView: React.FC<GradingViewProps> = ({ assessment, onUpdate, onBack }) => {
   const [selectedStudentId, setSelectedStudentId] = useState<string | null>(null);
   const [isAutoGrading, setIsAutoGrading] = useState(false);
+  const [pdfPages, setPdfPages] = useState<any[]>([]); // Store decoded PDF pages
+  const [isPdfLoading, setIsPdfLoading] = useState(false);
+  const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([]);
   
   const selectedStudent = assessment.students.find(s => s.id === selectedStudentId);
 
@@ -23,13 +30,76 @@ export const GradingView: React.FC<GradingViewProps> = ({ assessment, onUpdate, 
     }
   }, [assessment.students, selectedStudentId]);
 
+  // Load PDF using PDF.js when selected student changes
+  useEffect(() => {
+    const loadPdf = async () => {
+      if (!selectedStudent || !selectedStudent.fileData || selectedStudent.fileType.startsWith('image')) {
+        setPdfPages([]);
+        return;
+      }
+
+      setIsPdfLoading(true);
+      try {
+        // Decode Base64 to binary
+        const pdfData = atob(selectedStudent.fileData);
+        const loadingTask = pdfjsLib.getDocument({ data: pdfData });
+        const pdf = await loadingTask.promise;
+        
+        const pages = [];
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          pages.push(page);
+        }
+        setPdfPages(pages);
+      } catch (error) {
+        console.error("Error loading PDF:", error);
+      } finally {
+        setIsPdfLoading(false);
+      }
+    };
+
+    loadPdf();
+  }, [selectedStudent]);
+
+  // Render pages to canvases
+  useEffect(() => {
+    if (pdfPages.length === 0) return;
+
+    pdfPages.forEach((page, index) => {
+      const canvas = canvasRefs.current[index];
+      if (canvas) {
+        const viewport = page.getViewport({ scale: 1.5 }); // Scale for better quality
+        canvas.height = viewport.height;
+        canvas.width = viewport.width;
+
+        const renderContext = {
+          canvasContext: canvas.getContext('2d')!,
+          viewport: viewport,
+        };
+        page.render(renderContext);
+      }
+    });
+  }, [pdfPages]);
+
   const handleGradeChange = (questionId: string, gradeData: Partial<QuestionGrade>) => {
     if (!selectedStudent) return;
+
+    const rubricItem = assessment.rubric.find(r => r.id === questionId);
+    let newGradeData = { ...gradeData };
+
+    // Auto-recalculate score if studentAnswer is manually changed for MCQ
+    if (rubricItem?.type === 'MCQ' && 'studentAnswer' in gradeData && rubricItem.correctAnswer) {
+        const newVal = gradeData.studentAnswer?.trim().toUpperCase() || '';
+        const correct = rubricItem.correctAnswer.trim().toUpperCase();
+        // If the answer matches the key, give full points, otherwise 0
+        newGradeData.score = newVal === correct ? rubricItem.maxPoints : 0;
+        newGradeData.studentAnswer = newVal; 
+    }
 
     const currentGrade = selectedStudent.grades[questionId] || { score: 0, comment: '' };
     const newGrades = {
       ...selectedStudent.grades,
-      [questionId]: { ...currentGrade, ...gradeData }
+      [questionId]: { ...currentGrade, ...newGradeData }
     };
 
     // Recalculate total
@@ -47,6 +117,46 @@ export const GradingView: React.FC<GradingViewProps> = ({ assessment, onUpdate, 
     );
 
     onUpdate({ ...assessment, students: updatedStudents });
+  };
+
+  const handleKeyChange = (questionId: string, newKey: string) => {
+    // 1. Update the Rubric
+    const updatedRubric = assessment.rubric.map(r => 
+      r.id === questionId ? { ...r, correctAnswer: newKey.toUpperCase() } : r
+    );
+
+    // 2. Re-grade the current student for this specific question immediately
+    let updatedStudents = assessment.students;
+    
+    if (selectedStudent) {
+      const rubricItem = updatedRubric.find(r => r.id === questionId);
+      const currentGrade = selectedStudent.grades[questionId];
+      
+      // Only re-grade if we have a student answer to compare against
+      if (rubricItem && currentGrade?.studentAnswer) {
+         const isCorrect = currentGrade.studentAnswer.trim().toUpperCase() === newKey.trim().toUpperCase();
+         const newScore = isCorrect ? rubricItem.maxPoints : 0;
+         
+         const newGrades = {
+           ...selectedStudent.grades,
+           [questionId]: { ...currentGrade, score: newScore }
+         };
+         
+         const newTotal = Object.values(newGrades).reduce((sum, g) => sum + g.score, 0);
+         
+         const updatedStudent = {
+            ...selectedStudent,
+            grades: newGrades,
+            totalScore: newTotal
+         };
+
+         updatedStudents = assessment.students.map(s => 
+           s.id === selectedStudent.id ? updatedStudent : s
+         );
+      }
+    }
+
+    onUpdate({ ...assessment, rubric: updatedRubric, students: updatedStudents });
   };
 
   const runAiGrading = async () => {
@@ -158,11 +268,11 @@ export const GradingView: React.FC<GradingViewProps> = ({ assessment, onUpdate, 
         {selectedStudent ? (
           <>
             {/* Left: Document Viewer */}
-            <div className="hidden md:flex flex-1 bg-gray-100 rounded-xl overflow-hidden border border-gray-200 flex-col">
+            <div className="hidden md:flex flex-1 bg-gray-100 rounded-xl overflow-hidden border border-gray-200 flex-col relative group">
               <div className="bg-white p-2 border-b flex justify-between items-center px-4">
                 <span className="font-medium text-gray-600 truncate">{selectedStudent.fileName}</span>
               </div>
-              <div className="flex-1 relative overflow-auto bg-gray-200 flex justify-center p-4">
+              <div className="flex-1 relative overflow-auto bg-gray-500/10 flex justify-center p-4">
                 {/* PDF/Image Preview */}
                 {selectedStudent.fileType.startsWith('image') ? (
                   <img 
@@ -171,11 +281,21 @@ export const GradingView: React.FC<GradingViewProps> = ({ assessment, onUpdate, 
                     className="max-w-full shadow-lg"
                   />
                 ) : (
-                  <iframe 
-                    src={`data:${selectedStudent.fileType};base64,${selectedStudent.fileData}`}
-                    className="w-full h-full bg-white shadow-lg"
-                    title="Student PDF"
-                  />
+                  <div className="flex flex-col gap-4 items-center w-full">
+                    {isPdfLoading && (
+                      <div className="flex items-center gap-2 text-gray-500 mt-10">
+                        <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-indigo-600"></div>
+                        Rendering PDF...
+                      </div>
+                    )}
+                    {pdfPages.map((_, index) => (
+                      <canvas
+                        key={index}
+                        ref={(el) => { canvasRefs.current[index] = el; }}
+                        className="shadow-lg max-w-full bg-white rounded-sm"
+                      />
+                    ))}
+                  </div>
                 )}
               </div>
             </div>
@@ -220,17 +340,33 @@ export const GradingView: React.FC<GradingViewProps> = ({ assessment, onUpdate, 
                           
                           {/* MCQ Specific Display */}
                           {isMCQ ? (
-                            <div className="mt-2 flex items-center gap-4 text-sm">
-                               <div className="flex flex-col">
-                                 <span className="text-xs text-gray-500">Correct</span>
-                                 <span className="font-bold text-gray-700 bg-gray-100 px-2 py-1 rounded text-center">{item.correctAnswer || '?'}</span>
+                            <div className="mt-2 flex items-center gap-3 text-sm">
+                               <div className="flex flex-col items-center">
+                                 <span className="text-[10px] text-gray-500 uppercase font-bold mb-1">Key</span>
+                                 <input 
+                                   type="text"
+                                   maxLength={1}
+                                   value={item.correctAnswer || ''}
+                                   onChange={(e) => handleKeyChange(item.id, e.target.value)}
+                                   className="w-8 h-8 text-center font-bold rounded border border-indigo-200 bg-indigo-50 text-indigo-700 uppercase focus:ring-2 focus:ring-offset-1 focus:ring-indigo-500 focus:outline-none transition-colors"
+                                 />
                                </div>
-                               <div className="text-gray-300"><Icons.ChevronRight className="w-4 h-4"/></div>
-                               <div className="flex flex-col">
-                                 <span className="text-xs text-gray-500">Student</span>
-                                 <span className={`font-bold px-2 py-1 rounded text-center ${grade.studentAnswer ? (isCorrect ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700') : 'bg-gray-50 text-gray-400'}`}>
-                                    {grade.studentAnswer || '-'}
-                                 </span>
+                               <div className="text-gray-300 mt-4"><Icons.ChevronRight className="w-4 h-4"/></div>
+                               <div className="flex flex-col items-center">
+                                 <span className="text-[10px] text-gray-500 uppercase font-bold mb-1">Student</span>
+                                 <input 
+                                   type="text"
+                                   maxLength={1}
+                                   value={grade.studentAnswer || ''}
+                                   onChange={(e) => handleGradeChange(item.id, { studentAnswer: e.target.value })}
+                                   className={`w-8 h-8 text-center font-bold rounded border uppercase focus:ring-2 focus:ring-offset-1 focus:outline-none transition-colors
+                                     ${grade.studentAnswer 
+                                       ? (isCorrect 
+                                          ? 'bg-green-100 text-green-700 border-green-300 focus:ring-green-500' 
+                                          : 'bg-red-100 text-red-700 border-red-300 focus:ring-red-500') 
+                                       : 'bg-white text-gray-600 border-gray-300 focus:ring-indigo-500'}
+                                   `}
+                                 />
                                </div>
                             </div>
                           ) : (
