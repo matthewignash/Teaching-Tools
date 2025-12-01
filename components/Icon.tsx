@@ -1,0 +1,46 @@
+import React from 'react';
+import { 
+  Upload, 
+  FileText, 
+  CheckCircle, 
+  AlertCircle, 
+  Plus, 
+  Trash2, 
+  Save, 
+  Download, 
+  ChevronRight, 
+  ChevronLeft,
+  BrainCircuit,
+  Users,
+  BarChart3,
+  Settings,
+  X,
+  Edit2,
+  UserPlus,
+  FileSpreadsheet,
+  Scissors,
+  Layers
+} from 'lucide-react';
+
+export const Icons = {
+  Upload,
+  FileText,
+  CheckCircle,
+  AlertCircle,
+  Plus,
+  Trash2,
+  Save,
+  Download,
+  ChevronRight,
+  ChevronLeft,
+  Brain: BrainCircuit,
+  Users,
+  Analytics: BarChart3,
+  Settings,
+  Close: X,
+  Edit: Edit2,
+  UserPlus,
+  FileSpreadsheet,
+  Scissors,
+  Layers
+};

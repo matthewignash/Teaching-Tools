@@ -1,0 +1,305 @@
+import React, { useState, useEffect } from 'react';
+import { Assessment, StudentSubmission, RubricItem, QuestionGrade } from '../types';
+import { Button } from '../components/Button';
+import { Icons } from '../components/Icon';
+import { gradeStudentSubmission } from '../services/geminiService';
+
+interface GradingViewProps {
+  assessment: Assessment;
+  onUpdate: (assessment: Assessment) => void;
+  onBack: () => void;
+}
+
+export const GradingView: React.FC<GradingViewProps> = ({ assessment, onUpdate, onBack }) => {
+  const [selectedStudentId, setSelectedStudentId] = useState<string | null>(null);
+  const [isAutoGrading, setIsAutoGrading] = useState(false);
+  
+  const selectedStudent = assessment.students.find(s => s.id === selectedStudentId);
+
+  // Auto select first student if none selected
+  useEffect(() => {
+    if (!selectedStudentId && assessment.students.length > 0) {
+      setSelectedStudentId(assessment.students[0].id);
+    }
+  }, [assessment.students, selectedStudentId]);
+
+  const handleGradeChange = (questionId: string, gradeData: Partial<QuestionGrade>) => {
+    if (!selectedStudent) return;
+
+    const currentGrade = selectedStudent.grades[questionId] || { score: 0, comment: '' };
+    const newGrades = {
+      ...selectedStudent.grades,
+      [questionId]: { ...currentGrade, ...gradeData }
+    };
+
+    // Recalculate total
+    const total = Object.values(newGrades).reduce((sum, g) => sum + g.score, 0);
+
+    const updatedStudent: StudentSubmission = {
+      ...selectedStudent,
+      grades: newGrades,
+      totalScore: total,
+      status: 'GRADED' // Mark as graded once touched
+    };
+
+    const updatedStudents = assessment.students.map(s => 
+      s.id === selectedStudentId ? updatedStudent : s
+    );
+
+    onUpdate({ ...assessment, students: updatedStudents });
+  };
+
+  const runAiGrading = async () => {
+    if (!selectedStudent || !selectedStudent.fileData) return;
+
+    setIsAutoGrading(true);
+    try {
+      const results = await gradeStudentSubmission(
+        assessment.rubric, 
+        selectedStudent.fileData,
+        selectedStudent.fileType
+      );
+
+      const newGrades = { ...selectedStudent.grades };
+      let newTotal = 0;
+
+      results.forEach(res => {
+        // If it's MCQ, ensure strict scoring if possible
+        const rubricItem = assessment.rubric.find(r => r.id === res.questionId);
+        let finalScore = res.score;
+        
+        if (rubricItem?.type === 'MCQ' && rubricItem.correctAnswer && res.studentAnswer) {
+             const isCorrect = rubricItem.correctAnswer.trim().toUpperCase() === res.studentAnswer.trim().toUpperCase();
+             finalScore = isCorrect ? rubricItem.maxPoints : 0;
+        }
+
+        newGrades[res.questionId] = {
+          score: finalScore,
+          comment: res.comment,
+          studentAnswer: res.studentAnswer,
+          isAiSuggested: true
+        };
+        newTotal += finalScore;
+      });
+
+      const updatedStudent: StudentSubmission = {
+        ...selectedStudent,
+        grades: newGrades,
+        totalScore: newTotal,
+        status: 'GRADED'
+      };
+
+      const updatedStudents = assessment.students.map(s => 
+        s.id === selectedStudentId ? updatedStudent : s
+      );
+
+      onUpdate({ ...assessment, students: updatedStudents });
+
+    } catch (err) {
+      console.error(err);
+      alert("AI Grading failed. Please check your API key.");
+    } finally {
+      setIsAutoGrading(false);
+    }
+  };
+
+  const addCannedComment = (text: string) => {
+    if (!assessment.cannedComments.includes(text)) {
+      onUpdate({
+        ...assessment,
+        cannedComments: [...assessment.cannedComments, text]
+      });
+    }
+  };
+
+  if (assessment.students.length === 0) {
+    return (
+      <div className="text-center py-20">
+        <h3 className="text-xl font-bold text-gray-800">No students to grade</h3>
+        <Button onClick={onBack} variant="secondary" className="mt-4">Go Back to Add Students</Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-[calc(100vh-140px)] flex flex-col md:flex-row gap-6">
+      {/* Student List Sidebar */}
+      <div className="w-full md:w-64 flex-shrink-0 bg-white border border-gray-200 rounded-xl flex flex-col overflow-hidden shadow-sm">
+        <div className="p-4 border-b border-gray-100 bg-gray-50">
+          <h3 className="font-semibold text-gray-700">Students ({assessment.students.length})</h3>
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          {assessment.students.map(student => (
+            <button
+              key={student.id}
+              onClick={() => setSelectedStudentId(student.id)}
+              className={`w-full text-left p-3 border-b border-gray-100 transition-colors flex justify-between items-center
+                ${selectedStudentId === student.id ? 'bg-indigo-50 border-indigo-100' : 'hover:bg-gray-50'}
+              `}
+            >
+              <div>
+                <p className={`font-medium ${selectedStudentId === student.id ? 'text-indigo-900' : 'text-gray-900'}`}>
+                  {student.studentName}
+                </p>
+                <span className="text-xs text-gray-500">
+                  Total: {student.totalScore} pts
+                </span>
+              </div>
+              {student.status === 'GRADED' && (
+                <Icons.CheckCircle className="w-4 h-4 text-green-500" />
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Main Workspace */}
+      <div className="flex-1 flex flex-col md:flex-row gap-6 overflow-hidden">
+        {selectedStudent ? (
+          <>
+            {/* Left: Document Viewer */}
+            <div className="hidden md:flex flex-1 bg-gray-100 rounded-xl overflow-hidden border border-gray-200 flex-col">
+              <div className="bg-white p-2 border-b flex justify-between items-center px-4">
+                <span className="font-medium text-gray-600 truncate">{selectedStudent.fileName}</span>
+              </div>
+              <div className="flex-1 relative overflow-auto bg-gray-200 flex justify-center p-4">
+                {/* PDF/Image Preview */}
+                {selectedStudent.fileType.startsWith('image') ? (
+                  <img 
+                    src={`data:${selectedStudent.fileType};base64,${selectedStudent.fileData}`} 
+                    alt="Student work" 
+                    className="max-w-full shadow-lg"
+                  />
+                ) : (
+                  <iframe 
+                    src={`data:${selectedStudent.fileType};base64,${selectedStudent.fileData}`}
+                    className="w-full h-full bg-white shadow-lg"
+                    title="Student PDF"
+                  />
+                )}
+              </div>
+            </div>
+
+            {/* Right: Grading Panel */}
+            <div className="w-full md:w-[450px] bg-white rounded-xl border border-gray-200 flex flex-col shadow-sm">
+              <div className="p-4 border-b border-gray-100 flex justify-between items-center bg-gray-50 rounded-t-xl">
+                <div>
+                  <h2 className="font-bold text-lg text-gray-800">{selectedStudent.studentName}</h2>
+                  <p className="text-sm text-gray-500">
+                    Current Score: <span className="font-bold text-indigo-600">{selectedStudent.totalScore}</span>
+                  </p>
+                </div>
+                <Button 
+                  onClick={runAiGrading} 
+                  disabled={isAutoGrading || !selectedStudent.fileData}
+                  size="sm"
+                  className="gap-2 shadow-sm"
+                >
+                  {isAutoGrading ? 'Grading...' : <><Icons.Brain className="w-4 h-4" /> Auto-Grade</>}
+                </Button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-4 space-y-6">
+                {assessment.rubric.map((item) => {
+                  const grade = selectedStudent.grades[item.id] || { score: 0, comment: '', studentAnswer: '' };
+                  const isMCQ = item.type === 'MCQ';
+                  const isCorrect = isMCQ && item.correctAnswer && grade.studentAnswer 
+                     ? grade.studentAnswer.trim().toUpperCase() === item.correctAnswer.trim().toUpperCase()
+                     : false;
+                  
+                  return (
+                    <div key={item.id} className={`border rounded-lg p-4 transition-all 
+                      ${isMCQ && grade.studentAnswer ? (isCorrect ? 'border-green-200 bg-green-50/30' : 'border-red-200 bg-red-50/30') : 'border-gray-200'}
+                    `}>
+                      <div className="flex justify-between items-start mb-2">
+                        <div className="flex-1 mr-2">
+                          <span className="text-xs font-bold text-gray-500 uppercase flex items-center gap-2">
+                            {item.question} 
+                            {isMCQ && <span className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 text-[10px]">MCQ</span>}
+                          </span>
+                          
+                          {/* MCQ Specific Display */}
+                          {isMCQ ? (
+                            <div className="mt-2 flex items-center gap-4 text-sm">
+                               <div className="flex flex-col">
+                                 <span className="text-xs text-gray-500">Correct</span>
+                                 <span className="font-bold text-gray-700 bg-gray-100 px-2 py-1 rounded text-center">{item.correctAnswer || '?'}</span>
+                               </div>
+                               <div className="text-gray-300"><Icons.ChevronRight className="w-4 h-4"/></div>
+                               <div className="flex flex-col">
+                                 <span className="text-xs text-gray-500">Student</span>
+                                 <span className={`font-bold px-2 py-1 rounded text-center ${grade.studentAnswer ? (isCorrect ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700') : 'bg-gray-50 text-gray-400'}`}>
+                                    {grade.studentAnswer || '-'}
+                                 </span>
+                               </div>
+                            </div>
+                          ) : (
+                            <>
+                              <p className="font-medium text-gray-900 mt-1">{item.criteria}</p>
+                            </>
+                          )}
+
+                        </div>
+                        <div className="flex flex-col items-end">
+                          <div className="flex items-center gap-1">
+                             <input
+                              type="number"
+                              min="0"
+                              max={item.maxPoints}
+                              value={grade.score}
+                              onChange={(e) => handleGradeChange(item.id, { score: parseFloat(e.target.value) || 0 })}
+                              className={`w-14 p-1 text-right border rounded font-bold focus:ring-2 focus:ring-offset-1 
+                                ${isMCQ && grade.studentAnswer ? (isCorrect ? 'border-green-300 text-green-700 focus:ring-green-500' : 'border-red-300 text-red-700 focus:ring-red-500') : 'border-gray-300 text-indigo-600 focus:ring-indigo-500'}
+                              `}
+                            />
+                            <span className="text-sm text-gray-400">/ {item.maxPoints}</span>
+                          </div>
+                        </div>
+                      </div>
+                      
+                      {!isMCQ && (
+                        <div className="mt-3">
+                          <textarea
+                            placeholder="Feedback comment..."
+                            value={grade.comment}
+                            onChange={(e) => handleGradeChange(item.id, { comment: e.target.value })}
+                            rows={2}
+                            className="w-full text-sm border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500 bg-white"
+                          />
+                          <div className="flex flex-wrap gap-2 mt-2">
+                             {/* Quick add canned comment suggestion if empty */}
+                             {grade.comment === '' && assessment.cannedComments.slice(0, 3).map((cc, idx) => (
+                               <button 
+                                 key={idx}
+                                 onClick={() => handleGradeChange(item.id, { comment: cc })}
+                                 className="text-xs px-2 py-1 bg-gray-100 hover:bg-gray-200 rounded text-gray-600 truncate max-w-[200px]"
+                               >
+                                 {cc}
+                               </button>
+                             ))}
+                             {grade.comment && !assessment.cannedComments.includes(grade.comment) && (
+                               <button
+                                 onClick={() => addCannedComment(grade.comment)}
+                                 className="text-xs flex items-center gap-1 text-indigo-600 hover:text-indigo-700"
+                               >
+                                 <Icons.Plus className="w-3 h-3" /> Save as Canned
+                               </button>
+                             )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </>
+        ) : (
+          <div className="flex-1 flex items-center justify-center text-gray-400">
+            Select a student to begin grading
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};

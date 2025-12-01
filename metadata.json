@@ -1,0 +1,5 @@
+{
+  "name": "GradeMate AI",
+  "description": "An AI-powered assessment grading assistant. Create rubrics from answer keys, auto-grade student work, and export detailed reports.",
+  "requestFramePermissions": []
+}
